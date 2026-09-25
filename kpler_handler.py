@@ -80,18 +80,37 @@ def sample_positions(positions):
 class KplerSession:
     def __init__(self):
         tokens = load_tokens()
+        self.client_id = os.getenv("KPLER_CLIENT_ID", DEFAULT_CLIENT_ID).strip()
+        if not self.client_id:
+            raise KplerAuthenticationRequired("KPLER_CLIENT_ID is empty")
+        if tokens.get("client_id") and tokens["client_id"] != self.client_id:
+            raise KplerAuthenticationRequired(
+                "Saved Kpler token belongs to a different client ID than KPLER_CLIENT_ID; "
+                "check the Railway variable and the token's issuing application"
+            )
         self.refresh_token = tokens["refresh_token"]
-        # Refresh at startup; an inherited access token may already be expired.
+        # An access token can be reused only when its saved expiry is known.
+        # Legacy refresh-only files remain valid and simply refresh at startup.
         self.access_token = None
         self.token_expiry = None
+        self._using_saved_access = False
+        try:
+            expiry = datetime.fromisoformat(tokens["expires_at"])
+            if expiry.tzinfo and expiry > datetime.now(timezone.utc) + timedelta(seconds=30):
+                access = tokens.get("access_token")
+                if isinstance(access, str) and access:
+                    self.access_token = access
+                    self.token_expiry = expiry
+                    self._using_saved_access = True
+                    logging.getLogger(__name__).info("Using unexpired stored Kpler access token")
+        except (KeyError, TypeError, ValueError):
+            pass
 
     def ensure_access_token(self):
         now = datetime.now(timezone.utc)
-        if self.access_token and self.token_expiry and now < self.token_expiry:
+        if self.access_token and self.token_expiry and now + timedelta(seconds=30) < self.token_expiry:
             return
-        client_id = os.getenv("KPLER_CLIENT_ID", DEFAULT_CLIENT_ID).strip()
-        if not client_id:
-            raise KplerAuthenticationRequired("KPLER_CLIENT_ID is empty")
+        client_id = self.client_id
         try:
             with httpx.Client(timeout=20) as client:
                 response = client.post(TOKEN_URL, json={
@@ -167,11 +186,19 @@ class KplerSession:
             "login recovery" if login_recovery else "refresh",
             bool(data.get("refresh_token")), refresh != self.refresh_token,
         )
-        # Persist first: refresh-token rotation may invalidate the previous token.
-        save_tokens({"refresh_token": refresh})
+        # Persist both tokens and the issuing client before calling the API:
+        # refresh-token rotation may invalidate the previous refresh token.
+        expiry = datetime.now(timezone.utc) + timedelta(seconds=max(1, expires_in))
+        save_tokens({
+            "refresh_token": refresh,
+            "access_token": access,
+            "expires_at": expiry.isoformat(),
+            "client_id": client_id,
+        })
         self.refresh_token = refresh
         self.access_token = access
-        self.token_expiry = datetime.now(timezone.utc) + timedelta(seconds=max(1, expires_in - 30))
+        self.token_expiry = expiry
+        self._using_saved_access = False
 
     def get_positions(self, vessel_id, departure_dt):
         self.ensure_access_token()
@@ -191,6 +218,17 @@ class KplerSession:
                     f"https://terminal.kpler.com/api/vessels/{int(vessel_id)}/positions",
                     params=params, headers=headers,
                 )
+                if response.status_code == 401 and self._using_saved_access:
+                    # A server can revoke a token before its advertised expiry.
+                    # Refresh once and retry; do not retry indefinitely.
+                    self.access_token = None
+                    self.token_expiry = None
+                    self.ensure_access_token()
+                    headers["x-access-token"] = self.access_token
+                    response = client.get(
+                        f"https://terminal.kpler.com/api/vessels/{int(vessel_id)}/positions",
+                        params=params, headers=headers,
+                    )
         except httpx.HTTPError as exc:
             raise RuntimeError("Kpler positions request failed (network)") from exc
         if response.status_code in (401, 403):
