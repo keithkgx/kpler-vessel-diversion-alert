@@ -7,7 +7,7 @@ This project reads a Google Sheet watchlist, requests Kpler position history for
 ## 1. Check access before building infrastructure
 
 1. Ask your team's Kpler administrator whether your account is authorized to automate calls to the inherited `terminal.kpler.com/api/vessels/{id}/positions` endpoint and refresh-token grant. This is an inherited terminal interface, and its behavior, access rights and response format have **not** been verified live. If Kpler offers your organization a supported API, use its documented method instead.
-2. Arrange access to a Kpler login that is authorized for this monitoring job. The uploaded old token and password-bearing files were shared in a previous transfer. **Change the disclosed password and revoke those sessions** before continuing. Do not put those old credentials in the new deployment. The worker refreshes and saves its own tokens. `reauthorize_kpler.py` performs a separate, interactive password/MFA login when an operator starts it in a terminal; it never stores a password or MFA code. The scheduled worker does not prompt for passwords or MFA. If the refresh token is rejected, the worker exits with an error and sends a generic Telegram health notice if Telegram is working.
+2. Arrange access to a Kpler login that is authorized for this monitoring job. The uploaded old token and password-bearing files were shared in a previous transfer. **Change the disclosed password and revoke those sessions** before continuing. Do not put those old credentials in the new deployment. The worker refreshes and saves its own tokens. `reauthorize_kpler.py` performs a separate, interactive password/MFA login when an operator starts it in a terminal; it never stores a password or MFA code. If a refresh returns `invalid_grant`, the worker can try one unattended password login using private service variables. It saves only the replacement refresh token. MFA still requires an interactive login; a failed recovery exits with an error and sends a generic Telegram health notice if Telegram is working.
 3. Agree on where voyage and cargo data may be hosted. Kpler-derived tracks and commercially sensitive cargoes should only be put into a Google Sheet, Telegram chat and Streamlit hosting approved by your team. Use a private GitHub repository and private Streamlit app with explicitly invited viewers.
 
 ## 2. Prepare the watchlist
@@ -72,6 +72,17 @@ password grant to be enabled for the authorized account. If that grant is
 blocked, request a supported sign-in method from your Kpler administrator.
 A rejected token reports only the HTTP status and a recognized error code,
 never the response body or credential values.
+
+**Optional automatic login recovery:** Set `KPLER_EMAIL` and `KPLER_PASSWORD`
+in the worker's private environment (local `EMAIL` and `PASSWORD` also work).
+If a refresh returns `invalid_grant`, the worker tries a password grant once
+using the configured `KPLER_CLIENT_ID`, audience and scope. If Kpler accepts
+it, the new refresh token is saved to `KPLER_TOKEN_FILE` on the persistent
+volume, and the returned access token is used for the current run. The
+password is never written to the token file. `unauthorized_client`,
+`access_denied`, and `mfa_required` remain upstream login outcomes; the
+fallback cannot make an unavailable grant work. Do not put a password in Git,
+a JSON token file, or dashboard settings.
 
 **Interactive Windows login, after rotating any credentials already exposed:**
 
@@ -173,7 +184,7 @@ Your predecessor's `scraper.sh` activated a Python environment, changed into `/r
 
 1. Keep the original Windows setup working until the last dry run more than ten minutes apart has passed. Close the dedicated Kpler browser profile, and plan a brief transfer: stop the Windows Task Scheduler task if you created one, and do not run the Windows worker again after transferring its token file.
 2. Create a **private** GitHub repository containing this project's source files. Before committing, inspect `git status --short`: `secrets.env`, `kpler_tokens.json`, `.streamlit/secrets.toml`, `.venv` and logs must not appear. Put `Dockerfile` and `.dockerignore` beside `shipment_update_flagging_workflow.py`. Link that repository to a new Railway project/service. Railway detects the Dockerfile. In the service **Settings**, keep **Root Directory** at the directory containing the Dockerfile (typically `/` if the repo root contains these files).
-3. In Railway, attach a **volume** to the worker service with mount path `/data`. Set these service variables using the Railway **Variables** editor: `GSHEET_CREDENTIALS` = the **entire** service-account JSON as one JSON string; `SPREADSHEET_ID`, `SHEET_NAME`, `TELEGRAM_BOT_KEY`, and `TELEGRAM_CHANNEL_ID` = the same values you use locally; `KPLER_CLIENT_ID` = the client ID used by the successful local worker if you have set it; `KPLER_TOKEN_FILE=/data/kpler_tokens.json`; `WORKER_STATE_DIR=/data`; and initially `DRY_RUN=1`. Set `DASHBOARD_URL` only if you have deployed a dashboard. Do not upload `secrets.env` or the service-account JSON file to GitHub.
+3. In Railway, attach a **volume** to the worker service with mount path `/data`. Set these service variables using the Railway **Variables** editor: `GSHEET_CREDENTIALS` = the **entire** service-account JSON as one JSON string; `SPREADSHEET_ID`, `SHEET_NAME`, `TELEGRAM_BOT_KEY`, and `TELEGRAM_CHANNEL_ID` = the same values you use locally; `KPLER_CLIENT_ID` = the client ID used by the successful local worker if you have set it; `KPLER_TOKEN_FILE=/data/kpler_tokens.json`; `WORKER_STATE_DIR=/data`; and initially `DRY_RUN=1`. To enable automatic login recovery, add `KPLER_EMAIL` and `KPLER_PASSWORD` as private Railway **Variables** for the authorized account. Set `DASHBOARD_URL` only if you have deployed a dashboard. Do not upload `secrets.env` or the service-account JSON file to GitHub.
 4. Install and sign into the Railway CLI locally, link it to **this** Railway project, and select the worker service/production environment. Once the volume is attached, copy the **latest** locally rotated token file from your VS Code project terminal to the volume. The Railway CLI will prompt you to select a volume if there is more than one:
 
    ```powershell
