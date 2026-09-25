@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import reauthorize_kpler
@@ -46,21 +47,31 @@ class ReauthorizationTests(unittest.TestCase):
         self.addCleanup(self.http.stop)
         self.addCleanup(self.save.stop)
 
-    def test_password_login_saves_only_rotating_refresh_token(self):
+    def assert_saved_session(self, refresh, access, client_id):
+        self.saved.assert_called_once()
+        saved = self.saved.call_args.args[0]
+        self.assertEqual(saved["refresh_token"], refresh)
+        self.assertEqual(saved["access_token"], access)
+        self.assertEqual(saved["client_id"], client_id)
+        self.assertGreater(datetime.fromisoformat(saved["expires_at"]), datetime.now(timezone.utc))
+        self.assertNotIn("PASSWORD", saved)
+        self.assertNotIn("EMAIL", saved)
+
+    def test_password_login_saves_session_tokens_and_expiry(self):
         Client.responses = [Response(200, {"access_token": "access-secret",
-                                           "refresh_token": "new-refresh-secret"})]
+                                           "refresh_token": "new-refresh-secret", "expires_in": 600})]
         reauthorize_kpler.login_and_save("operator@example.com", "private-password", "app-id")
         self.assertEqual(Client.calls[0][2]["grant_type"], "password")
         self.assertEqual(Client.calls[0][2]["client_id"], "app-id")
-        self.saved.assert_called_once_with({"refresh_token": "new-refresh-secret"})
+        self.assert_saved_session("new-refresh-secret", "access-secret", "app-id")
 
-    def test_authenticator_mfa_uses_hidden_code_and_saves_only_refresh_token(self):
+    def test_authenticator_mfa_uses_hidden_code_and_saves_session(self):
         Client.responses = [Response(403, {"error": "mfa_required", "mfa_token": "mfa-secret"}),
                             Response(200, {"access_token": "access", "refresh_token": "rotated"})]
         reauthorize_kpler.login_and_save("operator@example.com", "password", "app-id",
                                          prompt=lambda _: "1", secret_prompt=lambda _: "123456")
         self.assertEqual(Client.calls[1][2]["otp"], "123456")
-        self.saved.assert_called_once_with({"refresh_token": "rotated"})
+        self.assert_saved_session("rotated", "access", "app-id")
 
     def test_email_mfa_uses_enrolled_authenticator(self):
         Client.responses = [
@@ -74,7 +85,7 @@ class ReauthorizationTests(unittest.TestCase):
                                          prompt=lambda _: "2", secret_prompt=lambda _: "789012")
         self.assertEqual(Client.calls[2][2]["authenticator_id"], "email|two")
         self.assertEqual(Client.calls[3][2]["binding_code"], "789012")
-        self.saved.assert_called_once_with({"refresh_token": "rotated"})
+        self.assert_saved_session("rotated", "access", "app-id")
 
     def test_rejected_login_does_not_overwrite_token_or_leak_response(self):
         Client.responses = [Response(401, {"error": "invalid_grant",
