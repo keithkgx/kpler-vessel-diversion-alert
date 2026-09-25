@@ -13,7 +13,7 @@ BASE_DIR = Path(__file__).resolve().parent
 # original project file. Never store a rotating token in a deployment image.
 TOKEN_FILE = Path(os.getenv("KPLER_TOKEN_FILE", str(BASE_DIR / "kpler_tokens.json"))).expanduser()
 TOKEN_URL = "https://kpler-prod.eu.auth0.com/oauth/token"
-DEFAULT_CLIENT_ID = "RD0LrdwB4uu1NcQ8x6WgwTPlJYvaQXm7"  # current repository default
+DEFAULT_CLIENT_ID = "0LglhXfJvfepANl3HqVT9i1U0OwV0gSP"  # current repository default
 MAX_STORED_POSITIONS = 180
 RECENT_POSITIONS = 75
 SAFE_ERROR_CODES = {"invalid_grant", "invalid_client", "unauthorized_client", "access_denied"}
