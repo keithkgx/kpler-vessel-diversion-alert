@@ -2,13 +2,14 @@
 
 The login uses the same Auth0 password and MFA grants as the inherited worker.
 It runs only when an operator starts this script in a terminal. Passwords and
-one-time codes are never saved; the rotating refresh token is stored by the
-existing Kpler handler for later worker runs.
+one-time codes are never saved; both returned tokens and the access expiry are
+stored by the existing Kpler handler for later worker runs.
 """
 
 import getpass
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from dotenv import load_dotenv
@@ -50,7 +51,7 @@ def _tokens(response):
 
 
 def login_and_save(email, password, client_id, *, prompt=input, secret_prompt=getpass.getpass):
-    """Run an interactive password/MFA login, saving only a successful refresh token."""
+    """Run an interactive password/MFA login, saving the resulting session."""
     if not email or not password or not client_id:
         raise KplerLoginError("Email, password and Kpler client ID are required")
 
@@ -122,7 +123,17 @@ def login_and_save(email, password, client_id, *, prompt=input, secret_prompt=ge
         raise KplerLoginError("Kpler login failed due to a network error") from exc
 
     # Never overwrite the working token file if login, MFA, or parsing fails.
-    save_tokens({"refresh_token": tokens["refresh_token"]})
+    try:
+        expires_in = int(tokens.get("expires_in", 300))
+    except (ValueError, TypeError) as exc:
+        raise KplerLoginError("Kpler login returned an invalid access expiry") from exc
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=max(1, expires_in))
+    save_tokens({
+        "refresh_token": tokens["refresh_token"],
+        "access_token": tokens["access_token"],
+        "expires_at": expires_at.isoformat(),
+        "client_id": client_id,
+    })
 
 
 def main():
@@ -136,7 +147,7 @@ def main():
         login_and_save(email, password, client_id)
     finally:
         del password
-    print("Kpler login succeeded. New refresh token saved; password and MFA codes were not stored.")
+    print("Kpler login succeeded. Session tokens saved; password and MFA codes were not stored.")
 
 
 if __name__ == "__main__":
