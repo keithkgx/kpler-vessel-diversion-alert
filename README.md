@@ -79,7 +79,14 @@ If a refresh returns `invalid_grant`, the worker tries a password grant once
 using the configured `KPLER_CLIENT_ID`, audience and scope. If Kpler accepts
 it, the new refresh token is saved to `KPLER_TOKEN_FILE` on the persistent
 volume, and the returned access token is used for the current run. The
-password is never written to the token file. `unauthorized_client`,
+worker also saves that access token, its expiry, and its client ID on the
+volume. On the next run it reuses the access token only if more than 30
+seconds remain. Expired tokens still need a refresh. A saved client ID that
+conflicts with Railway's `KPLER_CLIENT_ID` now produces a direct configuration
+error. Legacy refresh-only files remain supported, but their issuing client
+cannot be inferred from the token alone. These improvements cannot enable a
+password grant rejected by Auth0. The password is never written to the token
+file. `unauthorized_client`,
 `access_denied`, and `mfa_required` remain upstream login outcomes; the
 fallback cannot make an unavailable grant work. Do not put a password in Git,
 a JSON token file, or dashboard settings.
