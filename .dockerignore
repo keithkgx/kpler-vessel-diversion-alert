@@ -1,0 +1,14 @@
+.venv/
+.streamlit/
+__pycache__/
+.git/
+.railway/
+*.pyc
+*.log
+.worker_failed
+secrets.env
+kpler_tokens.json
+*.json
+.env
+*.env
+upload/

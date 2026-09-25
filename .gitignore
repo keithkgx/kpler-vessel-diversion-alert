@@ -1,0 +1,12 @@
+secrets.env
+kpler_tokens.json
+.streamlit/
+.venv/
+.railway/
+.env
+*.env
+*.json
+__pycache__/
+*.pyc
+*.log
+.worker_failed

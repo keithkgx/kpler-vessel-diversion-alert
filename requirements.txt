@@ -1,0 +1,7 @@
+gspread>=6,<7
+google-auth>=2,<3
+python-dotenv>=1,<2
+streamlit>=1.50,<2
+pydeck>=0.9,<1
+pandas>=2,<3
+tzdata>=2025.2
