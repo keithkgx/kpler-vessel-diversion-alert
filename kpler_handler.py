@@ -1,8 +1,4 @@
-"""Kpler position retrieval using an authorized, manually provisioned refresh token.
-
-This worker does not perform an unattended password/MFA login. Confirm that the
-endpoint and token grant are supported for your organization's Kpler access.
-"""
+"""Kpler positions with rotating refresh tokens and optional login recovery."""
 import json
 import logging
 import os
@@ -17,9 +13,19 @@ BASE_DIR = Path(__file__).resolve().parent
 # original project file. Never store a rotating token in a deployment image.
 TOKEN_FILE = Path(os.getenv("KPLER_TOKEN_FILE", str(BASE_DIR / "kpler_tokens.json"))).expanduser()
 TOKEN_URL = "https://kpler-prod.eu.auth0.com/oauth/token"
-DEFAULT_CLIENT_ID = "RD0LrdwB4uu1NcQ8x6WgwTPlJYvaQXm7"  # inherited public client ID
+DEFAULT_CLIENT_ID = "RD0LrdwB4uu1NcQ8x6WgwTPlJYvaQXm7"  # current repository default
 MAX_STORED_POSITIONS = 180
 RECENT_POSITIONS = 75
+SAFE_ERROR_CODES = {"invalid_grant", "invalid_client", "unauthorized_client", "access_denied"}
+
+
+def _error_code(response):
+    """Extract a known Auth0 code without exposing the response body."""
+    try:
+        body = response.json()
+        return body.get("error") if isinstance(body, dict) else None
+    except (ValueError, TypeError, AttributeError):
+        return None
 
 
 class KplerAuthenticationRequired(RuntimeError):
@@ -92,16 +98,51 @@ class KplerSession:
                     "grant_type": "refresh_token", "client_id": client_id,
                     "refresh_token": self.refresh_token,
                 })
+                if response.status_code in (400, 401, 403) and _error_code(response) == "invalid_grant":
+                    # The inherited worker obtained a new session with a password
+                    # grant when its refresh-token chain became invalid. Do this
+                    # only once, and only when unattended credentials are configured.
+                    email = (os.getenv("KPLER_EMAIL") or os.getenv("EMAIL") or "").strip()
+                    password = os.getenv("KPLER_PASSWORD") or os.getenv("PASSWORD") or ""
+                    if not email or not password:
+                        raise KplerAuthenticationRequired(
+                            "Kpler refresh token was rejected (invalid_grant); set "
+                            "KPLER_EMAIL and KPLER_PASSWORD on the worker to enable "
+                            "automatic login recovery, or reauthorize interactively"
+                        )
+                    logging.getLogger(__name__).warning(
+                        "Kpler refresh token rejected; attempting one password login"
+                    )
+                    response = client.post(TOKEN_URL, json={
+                        "grant_type": "password", "client_id": client_id,
+                        "username": email, "password": password,
+                        "audience": "https://terminal.kpler.com",
+                        "scope": "openid profile email offline_access",
+                    })
+                    if response.status_code != 200:
+                        code = _error_code(response)
+                        if code == "mfa_required":
+                            raise KplerAuthenticationRequired(
+                                "Kpler requires MFA for a new login; run "
+                                "reauthorize_kpler.py in an interactive terminal"
+                            )
+                        detail = f", {code}" if code in SAFE_ERROR_CODES else ""
+                        raise KplerAuthenticationRequired(
+                            f"Kpler password login rejected (HTTP {response.status_code}{detail}); "
+                            "check that this client permits password login and the "
+                            "account is authorized"
+                        )
+                    # A successful login returns an access token and a new refresh
+                    # token. Persist the refresh token before making any API request.
+                    login_recovery = True
+                else:
+                    login_recovery = False
         except httpx.HTTPError as exc:
             raise RuntimeError("Kpler token request failed (network)") from exc
         if response.status_code in (400, 401, 403):
             # Only expose a known error code; never print the response body or tokens.
-            try:
-                error_code = response.json().get("error")
-            except (ValueError, AttributeError):
-                error_code = None
-            safe_codes = {"invalid_grant", "invalid_client", "unauthorized_client", "access_denied"}
-            detail = f", {error_code}" if error_code in safe_codes else ""
+            error_code = _error_code(response)
+            detail = f", {error_code}" if error_code in SAFE_ERROR_CODES else ""
             raise KplerAuthenticationRequired(
                 f"Kpler token refresh rejected (HTTP {response.status_code}{detail}); "
                 "check for another session using the token, token expiry, "
@@ -114,11 +155,16 @@ class KplerSession:
             access = data["access_token"]
             refresh = data.get("refresh_token", self.refresh_token)
             expires_in = int(data.get("expires_in", 300))
-        except (ValueError, KeyError, TypeError) as exc:
+            if not isinstance(access, str) or not access or not isinstance(refresh, str) or not refresh:
+                raise ValueError("Missing tokens")
+            if login_recovery and not data.get("refresh_token"):
+                raise ValueError("Login returned no refresh token")
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
             raise RuntimeError("Kpler token response has an unexpected format") from exc
         # Do not log either token: a file timestamp does not prove rotation.
         logging.getLogger(__name__).info(
-            "Kpler refresh token: returned=%s changed=%s",
+            "Kpler %s token: returned=%s changed=%s",
+            "login recovery" if login_recovery else "refresh",
             bool(data.get("refresh_token")), refresh != self.refresh_token,
         )
         # Persist first: refresh-token rotation may invalidate the previous token.
