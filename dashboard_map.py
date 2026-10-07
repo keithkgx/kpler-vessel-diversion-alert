@@ -46,6 +46,8 @@ def prepare_trace(raw):
             "course": finite_number(ping.get("course"), 0, 360),
             "heading": finite_number(ping.get("heading"), 0, 359.99),
             "speed": finite_number(ping.get("speed"), 0),
+            "draught": finite_number(ping.get("draught"), 0),
+            "volume": finite_number(ping.get("volume"), 0),
         })
     points.sort(key=lambda p: p["time"])
     # A repeated AIS message should not add a zero-length segment.
@@ -102,13 +104,13 @@ def map_view(points, focus_latest=False):
     return {"latitude": (min(lats) + max(lats)) / 2, "longitude": center, "zoom": zoom}
 
 
-def course_arrow_icon(bearing):
+def course_arrow_icon(bearing, color="#0B5C80"):
     """An inlined arrow pointing along an AIS bearing in degrees from north."""
     angle = bearing % 360
     svg = (
         '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">'
         f'<g transform="rotate({angle:.2f} 32 32)">'
-        '<path d="M32 4 L53 52 L32 42 L11 52 Z" fill="#0B5C80" stroke="white" stroke-width="4" '
+        f'<path d="M32 4 L53 52 L32 42 L11 52 Z" fill="{color}" stroke="white" stroke-width="4" '
         'stroke-linejoin="round"/></g></svg>'
     )
     return "data:image/svg+xml;base64," + base64.b64encode(svg.encode("utf-8")).decode("ascii")
