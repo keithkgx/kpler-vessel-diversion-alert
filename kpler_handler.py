@@ -1,6 +1,7 @@
 """Kpler positions with rotating refresh tokens and optional login recovery."""
 import json
 import logging
+import math
 import os
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -251,5 +252,18 @@ class KplerSession:
             raise RuntimeError("Kpler returned the position limit; latest pings may be missing. Narrow voyage range")
         # Keep route-wide samples and the full recent window within one cell.
         window = sample_positions(valid)
-        unique = {p["receivedTime"]: {key: p[key] for key in fields if key in p} for p in window}
+        unique = {}
+        for p in window:
+            saved = {key: p[key] for key in fields if key in p}
+            # These fields may be absent from Kpler's response. Retain only
+            # finite, nonnegative numbers so a large/unexpected payload never
+            # fills the Google Sheets trace cell.
+            for key in ("draught", "volume"):
+                try:
+                    value = float(p[key])
+                except (KeyError, ValueError, TypeError):
+                    continue
+                if math.isfinite(value) and value >= 0:
+                    saved[key] = value
+            unique[p["receivedTime"]] = saved
         return [unique[timestamp] for timestamp in sorted(unique)]
