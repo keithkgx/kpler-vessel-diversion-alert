@@ -7,7 +7,7 @@ This project reads a Google Sheet watchlist, requests Kpler position history for
 ## 1. Check access before building infrastructure
 
 1. Ask your team's Kpler administrator whether your account is authorized to automate calls to the inherited `terminal.kpler.com/api/vessels/{id}/positions` endpoint and refresh-token grant. This is an inherited terminal interface, and its behavior, access rights and response format have **not** been verified live. If Kpler offers your organization a supported API, use its documented method instead.
-2. Arrange access to a Kpler login that is authorized for this monitoring job. The uploaded old token and password-bearing files were shared in a previous transfer. **Change the disclosed password and revoke those sessions** before continuing. Do not put those old credentials in the new deployment. The worker refreshes and saves its own tokens. `reauthorize_kpler.py` performs a separate, interactive password/MFA login when an operator starts it in a terminal; it never stores a password or MFA code. If a refresh returns `invalid_grant`, the worker can try one unattended password login using private service variables. It saves only the replacement refresh token. MFA still requires an interactive login; a failed recovery exits with an error and sends a generic Telegram health notice if Telegram is working.
+2. Arrange access to a Kpler login authorized for this monitoring job. The worker rotates refresh tokens and, if Kpler returns `invalid_grant`, can try one unattended password login using private service variables. It stores only the replacement refresh token. `reauthorize_kpler.py` supports interactive MFA when necessary. A scheduled worker cannot complete interactive MFA; failed recovery exits with an error and sends a generic Telegram health notice if Telegram is working.
 3. Agree on where voyage and cargo data may be hosted. Kpler-derived tracks and commercially sensitive cargoes should only be put into a Google Sheet, Telegram chat and Streamlit hosting approved by your team. Use a private GitHub repository and private Streamlit app with explicitly invited viewers.
 
 ## 2. Prepare the watchlist
@@ -73,23 +73,26 @@ blocked, request a supported sign-in method from your Kpler administrator.
 A rejected token reports only the HTTP status and a recognized error code,
 never the response body or credential values.
 
-**Optional automatic login recovery:** Set `KPLER_EMAIL` and `KPLER_PASSWORD`
-in the worker's private environment (local `EMAIL` and `PASSWORD` also work).
-If a refresh returns `invalid_grant`, the worker tries a password grant once
-using the configured `KPLER_CLIENT_ID`, audience and scope. If Kpler accepts
-it, the new refresh token is saved to `KPLER_TOKEN_FILE` on the persistent
-volume, and the returned access token is used for the current run. The
-worker also saves that access token, its expiry, and its client ID on the
-volume. On the next run it reuses the access token only if more than 30
-seconds remain. Expired tokens still need a refresh. A saved client ID that
-conflicts with Railway's `KPLER_CLIENT_ID` now produces a direct configuration
-error. Legacy refresh-only files remain supported, but their issuing client
-cannot be inferred from the token alone. These improvements cannot enable a
-password grant rejected by Auth0. The password is never written to the token
-file. `unauthorized_client`,
-`access_denied`, and `mfa_required` remain upstream login outcomes; the
-fallback cannot make an unavailable grant work. Do not put a password in Git,
-a JSON token file, or dashboard settings.
+**Optional automatic login recovery:** set `KPLER_EMAIL` and `KPLER_PASSWORD`
+in the worker's private environment (your existing local `EMAIL` and `PASSWORD`
+variables also work). If refresh returns `invalid_grant`, the worker tries
+the same password grant as the inherited code, with the configured
+`KPLER_CLIENT_ID`, audience and scope. If login succeeds, it saves the new
+refresh token on the configured `KPLER_TOKEN_FILE` volume and uses the returned
+access token for this run. The worker also saves the access token, its expiry,
+and the issuing client ID on the volume. A new process reuses an access token
+only while it has more than 30 seconds remaining; an expired token triggers a
+normal refresh. The password is never written to the token file.
+If the file has a saved client ID that differs from Railway's `KPLER_CLIENT_ID`,
+the worker stops with a clear configuration error before it contacts Kpler.
+Existing refresh-only token files remain supported, but they have no client
+metadata, so confirm the issuing client before transferring one to Railway.
+Even with access-token reuse, an hourly job must refresh once the access token
+expires. This change does not enable a password grant rejected by Auth0.
+`unauthorized_client`, `access_denied`, and `mfa_required` are upstream login
+outcomes: check the Railway log and use the interactive script for MFA. The
+fallback does not defeat an Auth0 grant that the selected client cannot use.
+Do not put the password into Git, a JSON token file, or the dashboard settings.
 
 **Interactive Windows login, after rotating any credentials already exposed:**
 
@@ -191,7 +194,7 @@ Your predecessor's `scraper.sh` activated a Python environment, changed into `/r
 
 1. Keep the original Windows setup working until the last dry run more than ten minutes apart has passed. Close the dedicated Kpler browser profile, and plan a brief transfer: stop the Windows Task Scheduler task if you created one, and do not run the Windows worker again after transferring its token file.
 2. Create a **private** GitHub repository containing this project's source files. Before committing, inspect `git status --short`: `secrets.env`, `kpler_tokens.json`, `.streamlit/secrets.toml`, `.venv` and logs must not appear. Put `Dockerfile` and `.dockerignore` beside `shipment_update_flagging_workflow.py`. Link that repository to a new Railway project/service. Railway detects the Dockerfile. In the service **Settings**, keep **Root Directory** at the directory containing the Dockerfile (typically `/` if the repo root contains these files).
-3. In Railway, attach a **volume** to the worker service with mount path `/data`. Set these service variables using the Railway **Variables** editor: `GSHEET_CREDENTIALS` = the **entire** service-account JSON as one JSON string; `SPREADSHEET_ID`, `SHEET_NAME`, `TELEGRAM_BOT_KEY`, and `TELEGRAM_CHANNEL_ID` = the same values you use locally; `KPLER_CLIENT_ID` = the client ID used by the successful local worker if you have set it; `KPLER_TOKEN_FILE=/data/kpler_tokens.json`; `WORKER_STATE_DIR=/data`; and initially `DRY_RUN=1`. To enable automatic login recovery, add `KPLER_EMAIL` and `KPLER_PASSWORD` as private Railway **Variables** for the authorized account. Set `DASHBOARD_URL` only if you have deployed a dashboard. Do not upload `secrets.env` or the service-account JSON file to GitHub.
+3. In Railway, attach a **volume** to the worker service with mount path `/data`. Set these service variables using the Railway **Variables** editor: `GSHEET_CREDENTIALS` = the **entire** service-account JSON as one JSON string; `SPREADSHEET_ID`, `SHEET_NAME`, `TELEGRAM_BOT_KEY`, and `TELEGRAM_CHANNEL_ID` = the same values you use locally; `KPLER_CLIENT_ID` = the client ID used by the successful local worker if you have set it; `KPLER_TOKEN_FILE=/data/kpler_tokens.json`; `WORKER_STATE_DIR=/data`; and initially `DRY_RUN=1`. To enable the inherited automatic recovery, add `KPLER_EMAIL` and `KPLER_PASSWORD` as private Railway **Variables** for the authorized account. Set `DASHBOARD_URL` only if you have deployed a dashboard. Do not upload `secrets.env` or the service-account JSON file to GitHub.
 4. Install and sign into the Railway CLI locally, link it to **this** Railway project, and select the worker service/production environment. Once the volume is attached, copy the **latest** locally rotated token file from your VS Code project terminal to the volume. The Railway CLI will prompt you to select a volume if there is more than one:
 
    ```powershell
@@ -225,15 +228,25 @@ from your VS Code project terminal to preview the dashboard locally:
 .\.venv\Scripts\python.exe -m streamlit run .\app.py
 ```
 
-Open Streamlit's localhost URL and select a vessel. The chart shows connected
-recorded route segments, recent positions in another color, and an arrow at
-the last reported location when Kpler reports heading or a moving course over ground.
-Use **Focus on latest position** to zoom to that position and **Refresh** to
-reload the sheet. Hover for timestamps; older than 48 hours shows a stale
-position warning. These are last *reported* positions, not a live vessel feed.
+Open Streamlit's localhost URL. The sidebar lets you select several vessels
+for a color-coded route comparison and inspect rows with missing/invalid
+positions. **Details and map focus** chooses the vessel shown in the metrics;
+**Focus on this vessel's last report** zooms to it, and **Show sampled position
+markers** displays individual AIS observations. Expand **Selected vessel
+details** to compare the latest positions, diversion flags and cargoes in a
+table. **Refresh data** reloads the Google Sheet.
+
+The map joins plausible saved route segments, highlights their latest sections,
+and places a colored arrow at each vessel's last reported location when Kpler
+reports heading or a moving course over ground. Hover for timestamps and
+coordinates. Older than 48 hours shows a stale-position warning for the
+focused vessel. These are last *reported* positions, not a live vessel feed.
 If the arrow is absent below 1 knot, no heading was available and AIS course
 may not reliably show its bow direction. Long gaps and implausible jumps are
 left open; the line between two AIS messages is only an approximate path.
+When Kpler supplies numeric draught or volume, the worker now saves those
+optional fields for the dashboard. Volume units are not inferred. Old traces
+may lack these fields until a successful worker run refreshes them.
 The worker now spreads saved points across the whole voyage while retaining
 the newest 75 consecutively. Run the worker again once after upgrading to
 repopulate older traces with the improved sampling. This may replace the
@@ -246,7 +259,7 @@ The missing original `app.py` has been replaced with a new read-only one. It **d
 git status --short
 ```
 
-On Streamlit Community Cloud, connect the private repo and choose `app.py`. Paste the contents of your locally generated `.streamlit/secrets.toml` into the app's Secrets settings; do not commit that file. Set the app private, then invite only the intended viewers. The optional shared password adds one more gate, though private hosting and invited viewers should control access. Streamlit may install `requirements.txt`, which contains only frontend dependencies. After the app works, enter its URL as `DASHBOARD_URL` in the VPS `secrets.env` and restart the next worker run; the Telegram link will then appear in subsequent alerts.
+On Streamlit Community Cloud, connect the private repo and choose `app.py`. Paste the contents of your locally generated `.streamlit/secrets.toml` into the app's Secrets settings; do not commit that file. Set the app private, then invite only the intended viewers. The optional shared password adds one more gate, though private hosting and invited viewers should control access. Streamlit may install `requirements.txt`, which contains only frontend dependencies. The existing Railway Dockerfile runs only the worker; deploying the repository there does not publish this dashboard. After the dashboard works, enter its URL as `DASHBOARD_URL` in the Railway worker's Variables and deploy the change; the Telegram link will then appear in subsequent alerts. Check a successful scheduled worker run separately before relying on fresh positions.
 
 ## 8. Check the trading usefulness
 

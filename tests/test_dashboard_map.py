@@ -1,7 +1,9 @@
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 from dashboard_map import map_view, prepare_trace, track_segments
+import kpler_handler
 from kpler_handler import sample_positions
 
 
@@ -46,6 +48,42 @@ class RouteTests(unittest.TestCase):
         }])
         self.assertEqual(points[0]["heading"], 135)
         self.assertEqual(points[0]["speed"], 0)
+
+    def test_worker_keeps_optional_ship_details_for_dashboard(self):
+        class Response:
+            status_code = 200
+
+            def json(self):
+                return [{
+                    "geo": {"lat": 1.2, "lon": 103.6},
+                    "receivedTime": "2026-09-25T00:00:00Z",
+                    "speed": 8, "heading": 120,
+                    "draught": "7.5", "volume": "inf",
+                }]
+
+        class Client:
+            def __init__(self, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def get(self, *args, **kwargs):
+                return Response()
+
+        with patch.object(kpler_handler, "load_tokens",
+                          return_value={"refresh_token": "fake"}), \
+             patch.object(kpler_handler.KplerSession, "ensure_access_token"), \
+             patch.object(kpler_handler.httpx, "Client", Client):
+            raw = kpler_handler.KplerSession().get_positions(119250, "2026-09-20")
+        self.assertEqual(raw[0]["draught"], 7.5)
+        self.assertNotIn("volume", raw[0])
+        points = prepare_trace(raw)
+        self.assertEqual(points[0]["draught"], 7.5)
+        self.assertIsNone(points[0]["volume"])
 
 
 if __name__ == "__main__":
